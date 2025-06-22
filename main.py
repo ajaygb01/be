@@ -2,31 +2,40 @@
 
 import os
 from typing import List, Optional, Tuple, Dict, Any
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from instagrapi import Client
-from instagrapi.exceptions import ChallengeRequired
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = FastAPI(title="Instagram Reel Comment Toolbox")
 
-# ─── Globals for authentication/session ────────────────────────────────
-_client: Optional[Client] = None
-_pending_challenge_url: Optional[str] = None
-
+# ─── Path to your pre-auth’d session ────────────────────────────────────
+SESSION_FILE = os.getenv("IG_SESSION_FILE", "ig_session.json")
 
 def get_creds() -> Tuple[str, str]:
-    user = (
-        os.getenv("IG_LOGIN") or
-        os.getenv("IG_USERNAME") or
-        os.getenv("IG_EMAIL")
-    )
-    pwd = os.getenv("IG_PASSWORD")
+    user = os.getenv("IG_LOGIN") or os.getenv("IG_USERNAME") or os.getenv("IG_EMAIL")
+    pwd  = os.getenv("IG_PASSWORD")
     if not user or not pwd:
-        raise HTTPException(500, "Please set IG_LOGIN (or IG_USERNAME/IG_EMAIL) and IG_PASSWORD in your env")
+        raise HTTPException(500, "Set IG_LOGIN and IG_PASSWORD in your env")
     return user, pwd
+
+def make_client() -> Client:
+    user, pwd = get_creds()
+    cl = Client()
+    # 1) Load saved session (cookies, tokens, 2FA, etc.)
+    if os.path.exists(SESSION_FILE):
+        cl.load_settings(SESSION_FILE)
+    # 2) If the session file wasn't valid or expired, fallback to login & re-dump
+    if not getattr(cl, "user_id", None):
+        cl.login(user, pwd)
+        cl.dump_settings(SESSION_FILE)
+    return cl
+
+def resolve_media_id(cl: Client, url: str) -> str:
+    pk = cl.media_pk_from_url(url)
+    return cl.media_id(pk)
 
 
 # ─── Request & Response Models ─────────────────────────────────────────
@@ -35,14 +44,14 @@ class ReelURL(BaseModel):
     reel_url: HttpUrl
 
 class FetchCommentsReq(ReelURL):
-    amount: int = 0           # 0 = all comments
-    min_id: Optional[str]     # for chunked pagination
+    amount: int = 0
+    min_id: Optional[str]
 
 class CommentItem(BaseModel):
     pk: int
     username: str
     text: str
-    created_at: str           # ISO8601
+    created_at: str
     like_count: int
     has_liked: Optional[bool]
     replied_to_comment_id: Optional[int]
@@ -55,75 +64,19 @@ class InsightsMediaReq(BaseModel):
     reel_url: HttpUrl
 
 
-# ─── Authentication Endpoints ──────────────────────────────────────────
-
-@app.post("/login")
-def login():
-    """
-    Start a login attempt.
-    - If credentials succeed immediately, returns {"status": "logged_in"}.
-    - If Instagram issues a challenge, returns {"status": "challenge_required", "api_path": "..."}.
-    """
-    global _client, _pending_challenge_url
-    user, pwd = get_creds()
-    cl = Client()
-    try:
-        cl.login(user, pwd)
-        _client = cl
-        return {"status": "logged_in"}
-    except ChallengeRequired as e:
-        _client = cl
-        _pending_challenge_url = e.last_json.get("challenge", {}).get("api_path")
-        return {
-            "status": "challenge_required",
-            "api_path": _pending_challenge_url
-        }
-
-
-@app.post("/login/challenge")
-def login_challenge(code: str = Body(..., embed=True)):
-    """
-    Resolve a pending 2FA/challenge by passing the code.
-    Call this after /login returns challenge_required.
-    """
-    global _client, _pending_challenge_url
-    if not _client or not _pending_challenge_url:
-        raise HTTPException(400, "No challenge pending. Call /login first.")
-    _client.challenge_code_handler = lambda username, choice: code
-    _client.challenge_resolve_simple(_pending_challenge_url)
-    return {"status": "logged_in"}
-
-
-def make_client() -> Client:
-    """
-    Retrieve the authenticated Client instance, or 401 if not logged in yet.
-    """
-    if _client and getattr(_client, "user_id", None):
-        return _client
-    raise HTTPException(401, "Not authenticated. Call /login and /login/challenge first.")
-
-
-# ─── Helpers ────────────────────────────────────────────────────────────
-
-def resolve_media_id(cl: Client, url: str) -> str:
-    pk = cl.media_pk_from_url(url)
-    return cl.media_id(pk)
-
-
 # ─── Endpoints ─────────────────────────────────────────────────────────
 
 @app.post("/comments", response_model=FetchCommentsRes)
 def fetch_comments(req: FetchCommentsReq):
     cl = make_client()
     media_id = resolve_media_id(cl, str(req.reel_url))
-
     if req.min_id:
         comments, next_min = cl.media_comments_chunk(media_id, req.amount, req.min_id)
     else:
         comments = cl.media_comments(media_id, amount=req.amount)
         next_min = None
 
-    out: List[CommentItem] = []
+    out = []
     for c in comments:
         out.append(CommentItem(
             pk=c.pk,
@@ -136,29 +89,21 @@ def fetch_comments(req: FetchCommentsReq):
         ))
     return FetchCommentsRes(comments=out, next_min_id=next_min)
 
-
 @app.post("/insights/media", response_model=Dict[str, Any])
 def insights_media(req: InsightsMediaReq):
-    """
-    Retrieve insights for a specific media item by URL.
-    """
     cl = make_client()
     media_pk = cl.media_pk_from_url(str(req.reel_url))
     return cl.insights_media(media_pk)
 
-
 @app.post("/summary", response_model=Dict[str, Any])
 def summary(req: InsightsMediaReq):
-    """
-    Returns a combined summary of insights + threaded comments.
-    """
     cl = make_client()
     media_pk = cl.media_pk_from_url(str(req.reel_url))
 
-    # insights
+    # 1) Get insights
     insights = cl.insights_media(media_pk)
 
-    # comments
+    # 2) Get all comments
     comments = cl.media_comments(media_pk, amount=0)
     reply_map: Dict[int, Dict[str, Any]] = {}
     top_comments: List[Dict[str, Any]] = []
@@ -181,7 +126,4 @@ def summary(req: InsightsMediaReq):
         else:
             top_comments.append(item)
 
-    return {
-        "insights": insights,
-        "comments": top_comments
-    }
+    return {"insights": insights, "comments": top_comments}
