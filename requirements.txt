@@ -2,9 +2,4 @@ fastapi
 uvicorn[standard]
 playwright
 pydantic
-instagrapi
 python-dotenv
-Pillow>=8.1.1
-selenium
-webdriver-manager
-bs4
