@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import List
 
 
 def transform_linkedin_post(raw_post: dict) -> dict:
@@ -20,6 +21,16 @@ def transform_linkedin_comment(item: dict) -> dict:
     author = item.get("author", {})
     posted_at = item.get("posted_at", {}).get("timestamp", 0)
 
+    # Convert nested replies to RepliesSimple format
+    replies_raw = item.get("replies", [])
+    replies: List[dict] = []
+    for reply in replies_raw:
+        reply_author = reply.get("author", {})
+        replies.append({
+            "name": reply_author.get("name", ""),
+            "comment": reply.get("text", "")
+        })
+
     return {
         "id": item.get("comment_id"),
         "user": author.get("name"),
@@ -28,7 +39,8 @@ def transform_linkedin_comment(item: dict) -> dict:
         "comment": item.get("text"),
         "likes": item.get("stats", {}).get("total_reactions", 0),
         "created_at": datetime.utcfromtimestamp(posted_at / 1000) if posted_at else datetime.utcfromtimestamp(0),
-        "replies_count": len(item.get("replies", []))
+        "replies_count": len(item.get("replies", [])),
+        "replies": replies
     }
 
 

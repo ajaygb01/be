@@ -15,6 +15,11 @@ class SimplifiedPost(BaseModel):
     comments_count: int
 
 
+class RepliesSimple(BaseModel):
+    name: str
+    comment: str
+
+
 class SimplifiedComment(BaseModel):
     id: Optional[str]
     user: Optional[str]
@@ -24,6 +29,7 @@ class SimplifiedComment(BaseModel):
     likes: int
     created_at: datetime
     replies_count: int
+    replies: List[RepliesSimple]
 
 
 class LinkedInFullRequest(BaseModel):
