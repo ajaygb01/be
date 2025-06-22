@@ -2,17 +2,19 @@
 
 import os
 from typing import List, Optional, Tuple, Dict, Any
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel, HttpUrl
 from instagrapi import Client
+from instagrapi.exceptions import ChallengeRequired
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = FastAPI(title="Instagram Reel Comment Toolbox")
 
-# Path to cache your logged-in session
-SESSION_FILE = os.getenv("IG_SESSION_FILE", "ig_session.json")
+# ─── Globals for authentication/session ────────────────────────────────
+_client: Optional[Client] = None
+_pending_challenge_url: Optional[str] = None
 
 
 def get_creds() -> Tuple[str, str]:
@@ -49,37 +51,59 @@ class FetchCommentsRes(BaseModel):
     comments: List[CommentItem]
     next_min_id: Optional[str]
 
-class PostCommentReq(ReelURL):
-    text: str
-    replied_to_comment_id: Optional[int]
-
-class CommentActionReq(ReelURL):
-    comment_pk: int
-
-class BulkDeleteReq(ReelURL):
-    comment_pks: List[int]
-
-
-# ─── Models for Insights Endpoints ─────────────────────────────────────
-
 class InsightsMediaReq(BaseModel):
     reel_url: HttpUrl
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────
+# ─── Authentication Endpoints ──────────────────────────────────────────
 
-def make_client() -> Client:
+@app.post("/login")
+def login():
+    """
+    Start a login attempt.
+    - If credentials succeed immediately, returns {"status": "logged_in"}.
+    - If Instagram issues a challenge, returns {"status": "challenge_required", "api_path": "..."}.
+    """
+    global _client, _pending_challenge_url
     user, pwd = get_creds()
     cl = Client()
-    # try loading a saved session
-    if os.path.exists(SESSION_FILE):
-        cl.load_settings(SESSION_FILE)
-    # only login if not already authenticated
-    if not cl.user_id:
+    try:
         cl.login(user, pwd)
-        # save session for next time
-        cl.dump_settings(SESSION_FILE)
-    return cl
+        _client = cl
+        return {"status": "logged_in"}
+    except ChallengeRequired as e:
+        _client = cl
+        _pending_challenge_url = e.last_json.get("challenge", {}).get("api_path")
+        return {
+            "status": "challenge_required",
+            "api_path": _pending_challenge_url
+        }
+
+
+@app.post("/login/challenge")
+def login_challenge(code: str = Body(..., embed=True)):
+    """
+    Resolve a pending 2FA/challenge by passing the code.
+    Call this after /login returns challenge_required.
+    """
+    global _client, _pending_challenge_url
+    if not _client or not _pending_challenge_url:
+        raise HTTPException(400, "No challenge pending. Call /login first.")
+    _client.challenge_code_handler = lambda username, choice: code
+    _client.challenge_resolve_simple(_pending_challenge_url)
+    return {"status": "logged_in"}
+
+
+def make_client() -> Client:
+    """
+    Retrieve the authenticated Client instance, or 401 if not logged in yet.
+    """
+    if _client and getattr(_client, "user_id", None):
+        return _client
+    raise HTTPException(401, "Not authenticated. Call /login and /login/challenge first.")
+
+
+# ─── Helpers ────────────────────────────────────────────────────────────
 
 def resolve_media_id(cl: Client, url: str) -> str:
     pk = cl.media_pk_from_url(url)
@@ -113,8 +137,6 @@ def fetch_comments(req: FetchCommentsReq):
     return FetchCommentsRes(comments=out, next_min_id=next_min)
 
 
-# ─── Insights: Media Endpoint ───────────────────────────────────────────
-
 @app.post("/insights/media", response_model=Dict[str, Any])
 def insights_media(req: InsightsMediaReq):
     """
@@ -125,17 +147,19 @@ def insights_media(req: InsightsMediaReq):
     return cl.insights_media(media_pk)
 
 
-# ─── Summary Endpoint ────────────────────────────────────────────────────
-
 @app.post("/summary", response_model=Dict[str, Any])
 def summary(req: InsightsMediaReq):
+    """
+    Returns a combined summary of insights + threaded comments.
+    """
     cl = make_client()
-    # get insights
     media_pk = cl.media_pk_from_url(str(req.reel_url))
+
+    # insights
     insights = cl.insights_media(media_pk)
-    # fetch all comments
+
+    # comments
     comments = cl.media_comments(media_pk, amount=0)
-    # nest replies under their parents
     reply_map: Dict[int, Dict[str, Any]] = {}
     top_comments: List[Dict[str, Any]] = []
 
