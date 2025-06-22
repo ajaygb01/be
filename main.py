@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from apify_client import ApifyClient
 from dotenv import load_dotenv
 import os
-from typing import List, Dict, Any
+from typing import List
 from datetime import datetime
 from models import (
     LinkedInFullRequest,
@@ -11,13 +11,19 @@ from models import (
     InstagramScrapeRequest,
     ApifyScrapeResult
 )
+from utils.transform import (
+    transform_linkedin_post,
+    transform_linkedin_comment,
+    transform_instagram_post,
+    transform_instagram_comment
+)
 
 load_dotenv()
 
 # ─── Configuration ───────────────────────────────────────────────────────
 
 APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_TOKEN")
-API_KEY = os.getenv("API_KEY", "ajay2025secret")  # Default static key
+API_KEY = os.getenv("API_KEY", "ajay2025secret")
 
 if not APIFY_TOKEN:
     raise Exception("❌ Missing APIFY_TOKEN in environment.")
@@ -79,7 +85,18 @@ def scrape_instagram_comments(
         run_input = {"url": str(req.url)}
         run = client.actor("8yz4aO3qlqckRu3nu").call(run_input=run_input)
         items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-        return {"data": items}
+
+        structured_items = []
+        for item in items:
+            post = transform_instagram_post(item)
+            comments = [transform_instagram_comment(c) for c in item.get("top_comments", [])]
+            structured_items.append({
+                "post": post,
+                "comments": comments
+            })
+
+        return {"data": structured_items}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Apify error: {str(e)}")
 
@@ -92,7 +109,7 @@ def scrape_linkedin_post_and_comments(
     _: str = Depends(verify_api_key)
 ):
     try:
-        # 1. Post scrape
+        # 1. Post info scrape
         post_info_input = {
             "urls": [str(req.url)],
             "deepScrape": True,
@@ -105,7 +122,7 @@ def scrape_linkedin_post_and_comments(
         post_run = client.actor("kfiWbq3boy3dWKbiL").call(run_input=post_info_input)
         post_info_items = list(client.dataset(post_run["defaultDatasetId"]).iterate_items())
 
-        # 2. Comments scrape
+        # 2. Comment scrape
         comments_input = {
             "postIds": [str(req.url)],
             "page_number": 1,
@@ -115,40 +132,12 @@ def scrape_linkedin_post_and_comments(
         comment_run = client.actor("2XnpwxfhSW1fAWElp").call(run_input=comments_input)
         comment_items = list(client.dataset(comment_run["defaultDatasetId"]).iterate_items())
 
-        # 3. Flatten post
-        raw_post = post_info_items[0]
-        author_info = raw_post.get("author", {})
-        post = {
-            "post_id": raw_post.get("urn"),
-            "type": raw_post.get("type", "unknown"),
-            "author": f"{author_info.get('firstName', '')} {author_info.get('lastName', '')}".strip(),
-            "author_headline": author_info.get("occupation", ""),
-            "author_profile_url": f"https://www.linkedin.com/in/{author_info.get('publicId', '')}",
-            "created_at": datetime.utcfromtimestamp(raw_post.get("postedAtTimestamp", 0) / 1000),
-            "display_url": raw_post.get("images", [None])[0],
-            "likes": raw_post.get("numLikes", 0),
-            "comments_count": raw_post.get("numComments", 0)
-        }
-
-        # 4. Flatten comments
-        comments = []
-        for item in comment_items:
-            if not item.get("comment_id"):
-                continue  # skip blank summary row
-            author = item.get("author", {})
-            posted_at = item.get("posted_at", {}).get("timestamp", 0)
-
-            comment = {
-                "id": item.get("comment_id"),
-                "user": author.get("name"),
-                "headline": author.get("headline", ""),
-                "profile_url": author.get("profile_url", ""),
-                "comment": item.get("text"),
-                "likes": item.get("stats", {}).get("reactions", {}).get("like", 0),
-                "created_at": datetime.utcfromtimestamp(posted_at / 1000) if posted_at else datetime.utcfromtimestamp(0),
-                "replies_count": len(item.get("replies", []))
-            }
-            comments.append(comment)
+        # 3. Transform post + comments
+        post = transform_linkedin_post(post_info_items[0])
+        comments = [
+            transform_linkedin_comment(item)
+            for item in comment_items if item.get("comment_id")
+        ]
 
         return {
             "post": post,
