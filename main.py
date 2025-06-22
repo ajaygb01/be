@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from instagrapi import Client
 from dotenv import load_dotenv
+from linkedin_routes import router as linkedin_router
 
 load_dotenv()
 
@@ -66,6 +67,7 @@ class InsightsMediaReq(BaseModel):
 
 # ─── Endpoints ─────────────────────────────────────────────────────────
 
+app.include_router(linkedin_router)
 @app.post("/comments", response_model=FetchCommentsRes)
 def fetch_comments(req: FetchCommentsReq):
     cl = make_client()
@@ -87,7 +89,7 @@ def fetch_comments(req: FetchCommentsReq):
             has_liked=c.has_liked,
             replied_to_comment_id=c.replied_to_comment_id
         ))
-    return FetchCommentsRes(comments=out, next_min_id=next_min)
+    return out
 
 @app.post("/insights/media", response_model=Dict[str, Any])
 def insights_media(req: InsightsMediaReq):
@@ -95,7 +97,7 @@ def insights_media(req: InsightsMediaReq):
     media_pk = cl.media_pk_from_url(str(req.reel_url))
     return cl.insights_media(media_pk)
 
-@app.post("/summary", response_model=Dict[str, Any])
+@app.post("/summary", response_model=list)
 def summary(req: InsightsMediaReq):
     cl = make_client()
     media_pk = cl.media_pk_from_url(str(req.reel_url))
@@ -112,9 +114,9 @@ def summary(req: InsightsMediaReq):
         item = {
             "pk": c.pk,
             "username": c.user.username,
-            "text": c.text,
+            "comment": c.text,
             "created_at": c.created_at_utc.isoformat(),
-            "like_count": c.like_count or 0,
+            "likes": c.like_count or 0,
             "has_liked": c.has_liked,
             "replies": []
         }
@@ -126,4 +128,4 @@ def summary(req: InsightsMediaReq):
         else:
             top_comments.append(item)
 
-    return {"insights": insights, "comments": top_comments}
+    return top_comments
