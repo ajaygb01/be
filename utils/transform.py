@@ -36,6 +36,7 @@ def transform_linkedin_comment(item: dict) -> dict:
         "user": author.get("name"),
         "headline": author.get("headline", ""),
         "profile_url": author.get("profile_url", ""),
+        "commentUrl": item.get("comment_url",""),
         "comment": item.get("text"),
         "likes": item.get("stats", {}).get("total_reactions", 0),
         "created_at": datetime.utcfromtimestamp(posted_at / 1000) if posted_at else datetime.utcfromtimestamp(0),

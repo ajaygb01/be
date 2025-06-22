@@ -26,6 +26,7 @@ class SimplifiedComment(BaseModel):
     headline: Optional[str]
     profile_url: Optional[HttpUrl]
     comment: Optional[str]
+    commentLink: Optional[str]
     likes: int
     created_at: datetime
     replies_count: int
